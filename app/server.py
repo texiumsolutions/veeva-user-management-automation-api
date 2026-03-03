@@ -7,6 +7,7 @@ from core.database import connect_to_mongo, close_mongo_connection
 from routes.user_routes import router as user_router
 from routes.server_routes import router as server_router
 from routes.scheduler_routes import router as scheduler_router
+from jobs.scheduler_route import router as hourly_router
 import os
 from dotenv import load_dotenv
 
@@ -33,6 +34,7 @@ app.add_middleware(
 app.include_router(user_router)
 app.include_router(server_router)
 app.include_router(scheduler_router)
+app.include_router(hourly_router)
 
 
 @app.on_event("startup")

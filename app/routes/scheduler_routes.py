@@ -288,3 +288,32 @@ async def health_check():
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+
+# =================== Custom Interval Endpoint ===================
+
+@router.post("/jobs/{job_id}/schedule-hourly/{minute}", response_model=Dict)
+async def schedule_job_hourly(job_id: str, minute: int):
+    try:
+        cron_config = {
+            "minute": str(minute),
+            "hour": "*",
+            "day_of_month": "*",
+            "month": "*",
+            "day_of_week": "*",
+        }
+
+        result = SchedulerService.update_job(job_id, cron_config)
+
+        if result["success"]:
+            return {
+                "status": "success",
+                "message": f"Job scheduled every hour at minute {minute}",
+                "job_id": job_id,
+                "cron": f"{minute} * * * *"
+            }
+        else:
+            raise HTTPException(status_code=400, detail=result["message"])
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
