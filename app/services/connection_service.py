@@ -13,7 +13,7 @@ class ConnectionService:
         connection_dict=connection.model_dump()
 
         connection_type = connection_dict.get("type")
-        print("here done type")
+    
 
         if connection_type == "veeva_vault":
             return ConnectionService._test_veeva(connection_dict)
