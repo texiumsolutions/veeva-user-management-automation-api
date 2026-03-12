@@ -16,7 +16,7 @@ router = APIRouter(
 )
 
 
-@router.get(
+@router.post(
     "/test",
     summary="Test external system connection"
 )
