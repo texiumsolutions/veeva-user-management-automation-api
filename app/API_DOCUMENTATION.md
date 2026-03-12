@@ -11,6 +11,7 @@ This is the complete API documentation for the Texium Backend application, which
 3. [Scheduler Job APIs](#scheduler-job-apis)
 4. [Scheduler Execution APIs](#scheduler-execution-apis)
 5. [Scheduler Utility APIs](#scheduler-utility-apis)
+6. [Connection Management APIs](#connection-management-apis)
 
 ---
 
@@ -555,6 +556,153 @@ The scheduler comes with 10 predefined job classes that can be used:
 
 ---
 
+## Connection Management APIs
+
+### 1. Create a Connection
+**Endpoint:** `POST /api/connections/`
+**Description:** Create a new external system connection (ServiceNow, Veeva Vault, SAP LeanIX, Workday, etc.)
+**Request Body:**
+```json
+{
+  "connectionName": "ServiceNow_Prod",
+  "displayName": "ServiceNow Production",
+  "description": "Production ServiceNow instance for ITOM",
+  "type": "servicenow",
+  "environment": "production",
+  "instanceUrl": "https://dev123456.service-now.com",
+  "tenantUrl": "https://tenant.service-now.com",
+  "tenantName": "tenant123",
+  "workspace": "workspace_01",
+  "region": "us",
+  "apiVersion": "v2",
+  "credentials": {
+    "authType": "basic",
+    "username": "admin",
+    "password": "password123"
+  }
+}
+```
+
+Alternatively, with OAuth2 authentication:
+```json
+{
+  "connectionName": "Veeva_Production",
+  "displayName": "Veeva Vault Production",
+  "type": "veeva_vault",
+  "environment": "production",
+  "instanceUrl": "https://login.veeva.com",
+  "credentials": {
+    "authType": "oauth2",
+    "clientId": "your-client-id",
+    "clientSecret": "your-client-secret",
+    "tokenUrl": "https://api.veeva.com/oauth/token",
+    "grantType": "client_credentials"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Connection created successfully",
+  "connection_id": "507f1f77bcf86cd799439020",
+  "data": {
+    "connectionName": "ServiceNow_Prod",
+    "displayName": "ServiceNow Production",
+    "description": "Production ServiceNow instance for ITOM",
+    "type": "servicenow",
+    "environment": "production",
+    "instanceUrl": "https://dev123456.service-now.com",
+    "tenantUrl": "https://tenant.service-now.com",
+    "tenantName": "tenant123",
+    "workspace": "workspace_01",
+    "region": "us",
+    "apiVersion": "v2",
+    "created_at": "2026-02-23T10:00:00",
+    "updated_at": "2026-02-23T10:00:00"
+  }
+}
+```
+
+### 2. Get All Connections
+**Endpoint:** `GET /api/connections/`
+**Description:** Retrieve all connections
+**Response:**
+```json
+{
+  "status": "success",
+  "message": "Connections retrieved successfully",
+  "total": 3,
+  "data": [
+    {
+      "_id": "507f1f77bcf86cd799439020",
+      "connectionName": "ServiceNow_Prod",
+      "displayName": "ServiceNow Production",
+      "description": "Production ServiceNow instance for ITOM",
+      "type": "servicenow",
+      "environment": "production",
+      "instanceUrl": "https://dev123456.service-now.com",
+      "tenantUrl": "https://tenant.service-now.com",
+      "tenantName": "tenant123",
+      "workspace": "workspace_01",
+      "region": "us",
+      "apiVersion": "v2",
+      "created_at": "2026-02-23T10:00:00",
+      "updated_at": "2026-02-23T10:00:00"
+    },
+    {
+      "_id": "507f1f77bcf86cd799439021",
+      "connectionName": "Veeva_Production",
+      "displayName": "Veeva Vault Production",
+      "description": "Production Veeva Vault instance",
+      "type": "veeva_vault",
+      "environment": "production",
+      "instanceUrl": "https://login.veeva.com",
+      "created_at": "2026-02-22T10:00:00",
+      "updated_at": "2026-02-22T10:00:00"
+    }
+  ]
+}
+```
+
+---
+
+## Connection Types
+
+The API supports 4 types of external system connections:
+
+| Type | Description | Example Use Case |
+|------|-------------|------------------|
+| `servicenow` | ServiceNow ITSM/ITOM platform | Incident management, CMDB, ITOM |
+| `veeva_vault` | Veeva Vault (EDC, eTMF, QMS) | Clinical trial data management |
+| `sap_leanix` | SAP LeanIX | Enterprise architecture management |
+| `workday` | Workday HCM/Finance | HR and financial management |
+
+---
+
+## Authentication Types
+
+Each connection supports different authentication methods:
+
+| Auth Type | Fields Required |
+|-----------|----------------|
+| `basic` | username, password |
+| `oauth2` | clientId, clientSecret, tokenUrl, grantType |
+| `api_key` | apiToken |
+
+---
+
+## Environment Types
+
+| Environment | Description |
+|-------------|-------------|
+| `production` | Production environment (default) |
+| `staging` | Staging/QA environment |
+| `development` | Development environment |
+
+---
+
 ## Cron Schedule Format
 
 Jobs use Unix cron scheduling format. Here are examples:
@@ -627,8 +775,9 @@ The application creates and uses the following MongoDB collections:
 
 1. **users** - User information
 2. **servers** - Server configurations
-3. **scheduler_jobs** - Scheduled jobs
-4. **scheduler_executions** - Job execution history
+3. **connections** - External system connections
+4. **scheduler_jobs** - Scheduled jobs
+5. **scheduler_executions** - Job execution history
 
 ---
 
@@ -657,5 +806,5 @@ The scheduler runs jobs in background threads and stores all execution results i
 
 ---
 
-**Version:** 2.0.0  
+**Version:** 2.1.0  
 **Last Updated:** February 23, 2026
