@@ -1,31 +1,269 @@
-"""Scheduler service for managing jobs and executions"""
-from models.job import Job, JobExecution
-from services.jobs import get_job_class, get_available_jobs
-from typing import List, Dict, Optional
+"""Scheduler service for managing jobs and executions."""
 from datetime import datetime
-from bson import ObjectId
+from threading import Lock, Thread
+from typing import Dict, Optional
 import traceback
-import asyncio
-from threading import Thread
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+from bson import ObjectId
+
+from models.job import Job, JobAuditLog, JobExecution
+from services.jobs import get_available_jobs, get_job_class
 
 
 class SchedulerService:
-    """Service for managing scheduled jobs"""
-    
-    # In-memory scheduler for background execution
+    """Service for managing scheduled jobs."""
+
     _scheduler = None
-    _executor_thread = None
-    
+    _scheduler_lock = Lock()
+
     @staticmethod
     def initialize_scheduler():
-        """Initialize the scheduler"""
+        """Initialize indexes and start the in-process scheduler."""
         try:
             Job.create_indexes()
             JobExecution.create_indexes()
+            JobAuditLog.create_indexes()
+
+            with SchedulerService._scheduler_lock:
+                if SchedulerService._scheduler is None:
+                    SchedulerService._scheduler = BackgroundScheduler(timezone="UTC")
+                    SchedulerService._scheduler.start()
+
+            SchedulerService.sync_all_jobs()
             return True
         except Exception as e:
             print(f"Error initializing scheduler: {e}")
             return False
+
+    @staticmethod
+    def shutdown_scheduler():
+        """Stop the in-process scheduler cleanly."""
+        with SchedulerService._scheduler_lock:
+            if SchedulerService._scheduler is not None:
+                SchedulerService._scheduler.shutdown(wait=False)
+                SchedulerService._scheduler = None
+
+    @staticmethod
+    def _build_trigger(job_data: dict) -> CronTrigger:
+        """Build a cron trigger from persisted job fields."""
+        return CronTrigger(
+            minute=job_data.get("minute", "*"),
+            hour=job_data.get("hour", "*"),
+            day=job_data.get("day_of_month", "*"),
+            month=job_data.get("month", "*"),
+            day_of_week=job_data.get("day_of_week", "*"),
+            week=job_data.get("week", "*"),
+            timezone="UTC",
+        )
+
+    @staticmethod
+    def _remove_scheduled_job(job_id: str):
+        """Remove a scheduled APScheduler job if it exists."""
+        if SchedulerService._scheduler is None:
+            return
+
+        existing_job = SchedulerService._scheduler.get_job(job_id)
+        if existing_job:
+            SchedulerService._scheduler.remove_job(job_id)
+
+    @staticmethod
+    def _sync_job_to_scheduler(job_data: dict):
+        """Create, update, or remove the APScheduler job for a stored job."""
+        if SchedulerService._scheduler is None:
+            return
+
+        job_id = str(job_data["_id"])
+        should_schedule = job_data.get("is_enabled", True) and not job_data.get("is_paused", False)
+
+        if not should_schedule:
+            SchedulerService._remove_scheduled_job(job_id)
+            Job.update_job(job_id, {"next_run_time": None})
+            return
+
+        trigger = SchedulerService._build_trigger(job_data)
+        scheduled_job = SchedulerService._scheduler.add_job(
+            SchedulerService._run_job_from_scheduler,
+            trigger=trigger,
+            args=[job_id],
+            id=job_id,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        Job.update_job(job_id, {"next_run_time": scheduled_job.next_run_time})
+
+    @staticmethod
+    def sync_all_jobs():
+        """Restore all persisted jobs into APScheduler."""
+        jobs = Job.find_all_jobs()
+        for job in jobs:
+            SchedulerService._sync_job_to_scheduler(job)
+
+    @staticmethod
+    def _run_job_from_scheduler(job_id: str):
+        """Entry point used by APScheduler."""
+        SchedulerService._execute_job(job_id, trigger_type="scheduled")
+
+    @staticmethod
+    def _serialize_audit_log(log: dict) -> Dict:
+        """Convert an audit log document into an API-friendly dict."""
+        return {
+            "_id": str(log["_id"]),
+            "job_id": str(log["job_id"]) if log.get("job_id") else None,
+            "user_id": str(log["user_id"]) if log.get("user_id") else None,
+            "job_name": log.get("job_name"),
+            "job_class_string": log.get("job_class_string"),
+            "event_type": log.get("event_type"),
+            "trigger_type": log.get("trigger_type"),
+            "status": log.get("status"),
+            "message": log.get("message", ""),
+            "details": log.get("details", {}),
+            "execution_id": str(log["execution_id"]) if log.get("execution_id") else None,
+            "created_at": log.get("created_at"),
+        }
+
+    @staticmethod
+    def _create_audit_log(
+        job: dict,
+        event_type: str,
+        message: str,
+        status: str = "info",
+        trigger_type: Optional[str] = None,
+        details: Optional[Dict] = None,
+        execution_id: Optional[str] = None,
+    ):
+        """Persist a scheduler audit event."""
+        JobAuditLog.insert_log({
+            "job_id": str(job["_id"]) if job.get("_id") else None,
+            "user_id": str(job["user_id"]) if job.get("user_id") else None,
+            "job_name": job.get("name"),
+            "job_class_string": job.get("job_class_string"),
+            "event_type": event_type,
+            "trigger_type": trigger_type,
+            "status": status,
+            "message": message,
+            "details": details or {},
+            "execution_id": execution_id,
+        })
+
+    @staticmethod
+    def _execute_job(job_id: str, trigger_type: str = "manual") -> Dict:
+        """Create an execution record and run the job in a background thread."""
+        job = Job.find_job_by_id(job_id)
+        if not job:
+            return {
+                "success": False,
+                "message": "Job not found",
+                "execution_id": None,
+            }
+
+        execution_data = {
+            "job_id": job_id,
+            "user_id": str(job["user_id"]),
+            "job_name": job["name"],
+            "job_class_string": job["job_class_string"],
+            "status": "running",
+            "output": "",
+            "error": "",
+            "started_at": datetime.utcnow(),
+        }
+        execution_id = JobExecution.insert_execution(execution_data)
+        SchedulerService._create_audit_log(
+            job,
+            event_type="job_triggered",
+            message=f"Job '{job['name']}' triggered via {trigger_type} run",
+            trigger_type=trigger_type,
+            status="info",
+            execution_id=str(execution_id),
+            details={
+                "pub_args": job.get("pub_args", []),
+                "pub_kwargs": job.get("pub_kwargs", {}),
+            },
+        )
+
+        def execute_job_background():
+            try:
+                job_class = get_job_class(job["job_class_string"])
+                if not job_class:
+                    raise ValueError(f"Job class '{job['job_class_string']}' not found")
+
+                job_instance = job_class(
+                    pub_args=job.get("pub_args", []),
+                    pub_kwargs=job.get("pub_kwargs", {}),
+                )
+                output = job_instance.run()
+                completed_at = datetime.utcnow()
+
+                JobExecution.update_execution(str(execution_id), {
+                    "status": "completed",
+                    "output": output,
+                    "completed_at": completed_at,
+                })
+
+                latest_job = Job.find_job_by_id(job_id) or job
+                next_run_time = None
+                if SchedulerService._scheduler is not None:
+                    scheduled_job = SchedulerService._scheduler.get_job(job_id)
+                    if scheduled_job:
+                        next_run_time = scheduled_job.next_run_time
+
+                Job.update_job(job_id, {
+                    "last_run_time": completed_at,
+                    "next_run_time": next_run_time,
+                    "total_executions": latest_job.get("total_executions", 0) + 1,
+                })
+                SchedulerService._create_audit_log(
+                    job,
+                    event_type="job_completed",
+                    message=f"Job '{job['name']}' completed successfully",
+                    trigger_type=trigger_type,
+                    status="success",
+                    execution_id=str(execution_id),
+                    details={
+                        "completed_at": completed_at.isoformat(),
+                        "next_run_time": next_run_time.isoformat() if next_run_time else None,
+                    },
+                )
+            except Exception as e:
+                JobExecution.update_execution(str(execution_id), {
+                    "status": "failed",
+                    "error": str(e) + "\n" + traceback.format_exc(),
+                    "completed_at": datetime.utcnow(),
+                })
+
+                next_run_time = None
+                if SchedulerService._scheduler is not None:
+                    scheduled_job = SchedulerService._scheduler.get_job(job_id)
+                    if scheduled_job:
+                        next_run_time = scheduled_job.next_run_time
+
+                Job.update_job(job_id, {
+                    "next_run_time": next_run_time,
+                })
+                SchedulerService._create_audit_log(
+                    job,
+                    event_type="job_failed",
+                    message=f"Job '{job['name']}' failed during execution",
+                    trigger_type=trigger_type,
+                    status="failed",
+                    execution_id=str(execution_id),
+                    details={
+                        "error": str(e),
+                        "next_run_time": next_run_time.isoformat() if next_run_time else None,
+                    },
+                )
+
+        thread = Thread(target=execute_job_background, daemon=True)
+        thread.start()
+
+        return {
+            "success": True,
+            "message": "Job execution started",
+            "execution_id": str(execution_id),
+        }
     
     @staticmethod
     def create_job(job_data: dict) -> Dict:
@@ -52,7 +290,28 @@ class SchedulerService:
                     "job_id": None
                 }
             
+            SchedulerService._build_trigger(job_data)
+
             job_id = Job.insert_job(job_data)
+            created_job = Job.find_job_by_id(str(job_id))
+            if created_job:
+                SchedulerService._sync_job_to_scheduler(created_job)
+                SchedulerService._create_audit_log(
+                    created_job,
+                    event_type="job_created",
+                    message=f"Job '{created_job['name']}' created",
+                    status="success",
+                    details={
+                        "schedule": {
+                            "minute": created_job.get("minute", "*"),
+                            "hour": created_job.get("hour", "*"),
+                            "day_of_month": created_job.get("day_of_month", "*"),
+                            "month": created_job.get("month", "*"),
+                            "day_of_week": created_job.get("day_of_week", "*"),
+                            "week": created_job.get("week", "*"),
+                        },
+                    },
+                )
             return {
                 "success": True,
                 "message": f"Job '{job_data.get('name')}' created successfully",
@@ -227,7 +486,22 @@ class SchedulerService:
                         "job_id": None
                     }
             
+            merged_job = {**existing_job, **job_data}
+            SchedulerService._build_trigger(merged_job)
+
             Job.update_job(job_id, job_data)
+            refreshed_job = Job.find_job_by_id(job_id)
+            if refreshed_job:
+                SchedulerService._sync_job_to_scheduler(refreshed_job)
+                SchedulerService._create_audit_log(
+                    refreshed_job,
+                    event_type="job_modified",
+                    message=f"Job '{refreshed_job['name']}' updated",
+                    status="success",
+                    details={
+                        "updated_fields": job_data,
+                    },
+                )
             
             return {
                 "success": True,
@@ -253,7 +527,14 @@ class SchedulerService:
                     "job_id": None
                 }
             
+            SchedulerService._remove_scheduled_job(job_id)
             Job.delete_job(job_id)
+            SchedulerService._create_audit_log(
+                existing_job,
+                event_type="job_deleted",
+                message=f"Job '{existing_job['name']}' deleted",
+                status="success",
+            )
             
             return {
                 "success": True,
@@ -280,6 +561,15 @@ class SchedulerService:
                 }
             
             Job.pause_job(job_id)
+            paused_job = Job.find_job_by_id(job_id)
+            if paused_job:
+                SchedulerService._sync_job_to_scheduler(paused_job)
+                SchedulerService._create_audit_log(
+                    paused_job,
+                    event_type="job_paused",
+                    message=f"Job '{paused_job['name']}' paused",
+                    status="success",
+                )
             
             return {
                 "success": True,
@@ -306,6 +596,18 @@ class SchedulerService:
                 }
             
             Job.resume_job(job_id)
+            resumed_job = Job.find_job_by_id(job_id)
+            if resumed_job:
+                SchedulerService._sync_job_to_scheduler(resumed_job)
+                SchedulerService._create_audit_log(
+                    resumed_job,
+                    event_type="job_resumed",
+                    message=f"Job '{resumed_job['name']}' resumed",
+                    status="success",
+                    details={
+                        "next_run_time": resumed_job.get("next_run_time").isoformat() if resumed_job.get("next_run_time") else None,
+                    },
+                )
             
             return {
                 "success": True,
@@ -321,75 +623,9 @@ class SchedulerService:
     
     @staticmethod
     def run_job_now(job_id: str) -> Dict:
-        """Execute a job immediately"""
+        """Execute a job immediately."""
         try:
-            job = Job.find_job_by_id(job_id)
-            if not job:
-                return {
-                    "success": False,
-                    "message": "Job not found",
-                    "execution_id": None
-                }
-            
-            # Create execution record
-            execution_data = {
-                "job_id": job_id,
-                "user_id": str(job["user_id"]),
-                "job_name": job["name"],
-                "job_class_string": job["job_class_string"],
-                "status": "running",
-                "output": "",
-                "error": "",
-                "started_at": datetime.utcnow()
-            }
-            
-            execution_id = JobExecution.insert_execution(execution_data)
-            
-            # Execute the job in background
-            def execute_job_background():
-                try:
-                    job_class = get_job_class(job["job_class_string"])
-                    if job_class:
-                        job_instance = job_class(
-                            pub_args=job.get("pub_args", []),
-                            pub_kwargs=job.get("pub_kwargs", {})
-                        )
-                        output = job_instance.run()
-                        
-                        # Update execution with success
-                        JobExecution.update_execution(str(execution_id), {
-                            "status": "completed",
-                            "output": output,
-                            "completed_at": datetime.utcnow()
-                        })
-                        
-                        # Update job stats
-                        Job.update_job(job_id, {
-                            "last_run_time": datetime.utcnow(),
-                            "total_executions": job.get("total_executions", 0) + 1
-                        })
-                    else:
-                        JobExecution.update_execution(str(execution_id), {
-                            "status": "failed",
-                            "error": "Job class not found",
-                            "completed_at": datetime.utcnow()
-                        })
-                except Exception as e:
-                    JobExecution.update_execution(str(execution_id), {
-                        "status": "failed",
-                        "error": str(e) + "\n" + traceback.format_exc(),
-                        "completed_at": datetime.utcnow()
-                    })
-            
-            # Start job in background thread
-            thread = Thread(target=execute_job_background, daemon=True)
-            thread.start()
-            
-            return {
-                "success": True,
-                "message": "Job execution started",
-                "execution_id": str(execution_id)
-            }
+            return SchedulerService._execute_job(job_id, trigger_type="manual")
         except Exception as e:
             return {
                 "success": False,
@@ -476,6 +712,50 @@ class SchedulerService:
                 "success": False,
                 "message": str(e),
                 "data": None
+            }
+
+    @staticmethod
+    def get_audit_logs(job_id: Optional[str] = None, event_type: Optional[str] = None, limit: int = 100) -> Dict:
+        """Get scheduler audit logs."""
+        try:
+            logs = JobAuditLog.find_logs(job_id=job_id, event_type=event_type, limit=limit)
+            logs_data = [SchedulerService._serialize_audit_log(log) for log in logs]
+            return {
+                "success": True,
+                "message": "Audit logs retrieved successfully",
+                "total": len(logs_data),
+                "data": logs_data,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": str(e),
+                "total": 0,
+                "data": [],
+            }
+
+    @staticmethod
+    def get_audit_log(log_id: str) -> Dict:
+        """Get a specific scheduler audit log."""
+        try:
+            log = JobAuditLog.find_log_by_id(log_id)
+            if not log:
+                return {
+                    "success": False,
+                    "message": "Audit log not found",
+                    "data": None,
+                }
+
+            return {
+                "success": True,
+                "message": "Audit log retrieved successfully",
+                "data": SchedulerService._serialize_audit_log(log),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": str(e),
+                "data": None,
             }
     
     @staticmethod

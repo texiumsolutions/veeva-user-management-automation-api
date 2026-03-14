@@ -74,6 +74,22 @@ class JobExecutionResponse(BaseModel):
     created_at: datetime
 
 
+class JobAuditLogResponse(BaseModel):
+    """Response schema for a scheduler audit log."""
+    audit_log_id: str = Field(..., alias="_id")
+    job_id: Optional[str] = None
+    user_id: Optional[str] = None
+    job_name: Optional[str] = None
+    job_class_string: Optional[str] = None
+    event_type: str
+    trigger_type: Optional[str] = None
+    status: str
+    message: str
+    details: Dict
+    execution_id: Optional[str] = None
+    created_at: datetime
+
+
 class JobListResponse(BaseModel):
     """Response schema for listing jobs"""
     status: str
@@ -99,6 +115,21 @@ class ExecutionListResponse(BaseModel):
 
 class ExecutionDetailResponse(BaseModel):
     """Response schema for execution details"""
+    status: str
+    message: str
+    data: Dict
+
+
+class AuditLogListResponse(BaseModel):
+    """Response schema for listing audit logs."""
+    status: str
+    message: str
+    total: int
+    data: List[Dict]
+
+
+class AuditLogDetailResponse(BaseModel):
+    """Response schema for audit log details."""
     status: str
     message: str
     data: Dict

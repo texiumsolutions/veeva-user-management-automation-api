@@ -4,13 +4,10 @@ from schemas.job import (
     JobCreateRequest, JobUpdateRequest, JobListResponse,
     JobDetailResponse, ExecutionListResponse, ExecutionDetailResponse,
     JobActionResponse, ExecutionRunResponse, AvailableJobsResponse,
-    JobStatsResponse
+    JobStatsResponse, AuditLogListResponse, AuditLogDetailResponse
 )
 from services.scheduler_service import SchedulerService
 from typing import Dict, Optional
-
-# Initialize scheduler
-SchedulerService.initialize_scheduler()
 
 router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
 
@@ -233,6 +230,45 @@ async def get_execution(execution_id: str):
             }
         else:
             raise HTTPException(status_code=404, detail=result["message"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/audit-logs", response_model=Dict)
+async def get_audit_logs(
+    job_id: Optional[str] = Query(None),
+    event_type: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Get scheduler audit logs."""
+    try:
+        result = SchedulerService.get_audit_logs(job_id=job_id, event_type=event_type, limit=limit)
+
+        return {
+            "status": "success",
+            "message": result["message"],
+            "total": result["total"],
+            "data": result["data"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/audit-logs/{log_id}", response_model=Dict)
+async def get_audit_log(log_id: str):
+    """Get a specific scheduler audit log."""
+    try:
+        result = SchedulerService.get_audit_log(log_id)
+
+        if result["success"]:
+            return {
+                "status": "success",
+                "message": result["message"],
+                "data": result["data"]
+            }
+        raise HTTPException(status_code=404, detail=result["message"])
     except HTTPException:
         raise
     except Exception as e:

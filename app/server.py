@@ -9,6 +9,7 @@ from routes.server_routes import router as server_router
 from routes.scheduler_routes import router as scheduler_router
 from jobs.scheduler_route import router as hourly_router
 from routes.connection_routes import router as connection_router
+from services.scheduler_service import SchedulerService
 import os
 from dotenv import load_dotenv
 
@@ -44,6 +45,7 @@ async def startup_event():
     """Initialize database connection on startup"""
     try:
         connect_to_mongo()
+        SchedulerService.initialize_scheduler()
         print("✓ Application started successfully")
     except Exception as e:
         print(f"✗ Failed to start application: {e}")
@@ -53,6 +55,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Close database connection on shutdown"""
+    SchedulerService.shutdown_scheduler()
     close_mongo_connection()
 
 

@@ -257,3 +257,67 @@ class JobExecution:
             return result.modified_count > 0
         except:
             return False
+
+
+class JobAuditLog:
+    """JobAuditLog model - represents scheduler lifecycle audit events."""
+
+    @staticmethod
+    def create_indexes():
+        """Create indexes on audit logs collection."""
+        db = get_db()
+        audit_collection = db['scheduler_audit_logs']
+        audit_collection.create_index([("job_id", ASCENDING)])
+        audit_collection.create_index([("user_id", ASCENDING)])
+        audit_collection.create_index([("event_type", ASCENDING)])
+        audit_collection.create_index([("created_at", ASCENDING)])
+
+    @staticmethod
+    def insert_log(log_data: dict):
+        """Insert a new audit log record."""
+        db = get_db()
+        audit_collection = db['scheduler_audit_logs']
+
+        log_doc = {
+            "job_id": ObjectId(log_data.get("job_id")) if isinstance(log_data.get("job_id"), str) else log_data.get("job_id"),
+            "user_id": ObjectId(log_data.get("user_id")) if isinstance(log_data.get("user_id"), str) else log_data.get("user_id"),
+            "job_name": log_data.get("job_name"),
+            "job_class_string": log_data.get("job_class_string"),
+            "event_type": log_data.get("event_type"),
+            "trigger_type": log_data.get("trigger_type"),
+            "status": log_data.get("status", "info"),
+            "message": log_data.get("message", ""),
+            "details": log_data.get("details", {}),
+            "execution_id": ObjectId(log_data.get("execution_id")) if isinstance(log_data.get("execution_id"), str) else log_data.get("execution_id"),
+            "created_at": datetime.utcnow()
+        }
+        result = audit_collection.insert_one(log_doc)
+        return result.inserted_id
+
+    @staticmethod
+    def find_log_by_id(log_id: str):
+        """Find an audit log by ID."""
+        db = get_db()
+        audit_collection = db['scheduler_audit_logs']
+        try:
+            return audit_collection.find_one({"_id": ObjectId(log_id)})
+        except:
+            return None
+
+    @staticmethod
+    def find_logs(job_id: Optional[str] = None, event_type: Optional[str] = None, limit: int = 100):
+        """Find audit logs with optional filters."""
+        db = get_db()
+        audit_collection = db['scheduler_audit_logs']
+
+        query = {}
+        try:
+            if job_id:
+                query["job_id"] = ObjectId(job_id) if isinstance(job_id, str) else job_id
+        except:
+            return []
+
+        if event_type:
+            query["event_type"] = event_type
+
+        return list(audit_collection.find(query).sort("created_at", -1).limit(limit))
